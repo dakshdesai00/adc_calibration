@@ -263,16 +263,40 @@ Let's trace how the Verilog module [adc_calibrator.v](rtl/adc_calibrator.v) eval
    y_{\text{scaled\_comb}} = \text{COEFF\_C0} + (p_1 \gg 12) + (p_2 \gg 12) + (p_3 \gg 12) + 2048
    $$
    We verify the mathematical scaling of each term:
-   * Term 1: $\text{COEFF\_C0} = w_0$
-   * Term 2: $\frac{p_1}{2^{12}} = \frac{\text{COEFF\_C1} \cdot x}{2^{12}} = \frac{(w_1 \cdot 2^{12}) \cdot x}{2^{12}} = w_1 x$
-   * Term 3: $\frac{p_2}{2^{12}} = \frac{\text{COEFF\_C2} \cdot (x^2 / 2^{12})}{2^{12}} = \frac{(w_2 \cdot 2^{24}) \cdot x^2}{2^{24}} = w_2 x^2$
-   * Term 4: $\frac{p_3}{2^{12}} = \frac{\text{COEFF\_C3} \cdot (x^3 / 2^{24})}{2^{12}} = \frac{(w_3 \cdot 2^{36}) \cdot x^3}{2^{36}} = w_3 x^3$
+   * **Term 1**:
+     $$
+     \text{COEFF\_C0} = w_0
+     $$
+   * **Term 2**:
+     $$
+     \frac{p_1}{2^{12}} = \frac{\text{COEFF\_C1} \cdot x}{2^{12}} = \frac{(w_1 \cdot 2^{12}) \cdot x}{2^{12}} = w_1 x
+     $$
+   * **Term 3**:
+     $$
+     \frac{p_2}{2^{12}} = \frac{\text{COEFF\_C2} \cdot (x^2 / 2^{12})}{2^{12}} = \frac{(w_2 \cdot 2^{24}) \cdot x^2}{2^{24}} = w_2 x^2
+     $$
+   * **Term 4**:
+     $$
+     \frac{p_3}{2^{12}} = \frac{\text{COEFF\_C3} \cdot (x^3 / 2^{24})}{2^{12}} = \frac{(w_3 \cdot 2^{36}) \cdot x^3}{2^{36}} = w_3 x^3
+     $$
    The scaling aligns perfectly, producing the reconstructed calibrated code. Adding $2048$ restores the offset to the standard unsigned 12-bit range $[0, 4095]$.
 5. **Saturation Logic**:
    To prevent overflow wrap-around where values exceeding 4095 wrap around to 0 (causing severe dynamic noise spikes), a clipping block constrains the output code to $[0, 4095]$:
    $$
    \text{calibrated\_adc} = \max(0, \min(4095, y_{\text{scaled\_comb}}))
    $$
+---
+ 
+## Hardware-in-the-Loop (HIL) Implementation
+ 
+We designed and implemented a hardware-in-the-loop (HIL) calibration system consisting of:
+ 
+1. **Signal Distortion Simulation**: A Python host application [host_app.py](host_app.py) that simulates high-frequency analog input signals, injects mathematical non-linear harmonic distortions to simulate physical ADC limitations, streams the distorted codes to the microcontroller, and reads back the calibrated results.
+2. **Interface Bridge**: An RP2040 microcontroller running [rp2040_bus.py](rp2040_bus.py) that acts as the communication link. To prevent data transmission bottlenecks and maintain high sampling rates, it interfaces with the FPGA over a 4-bit bidirectional parallel bus using direct memory-mapped access to the RP2040 SIO registers (bypassing slow hardware abstraction layers).
+3. **Sequential FPGA Polynomial Engine**: A Verilog processor synthesized for the SLG47910 FPGA (using [top.v](rtl/top.v)).
+   * [parallel_rx.v](rtl/parallel_rx.v) deserializes raw 12-bit ADC data received in 3 sequential nibbles.
+   * [adc_calibrator.v](rtl/adc_calibrator.v) implements a sequential 12-state FSM that performs the polynomial calculations. It uses a single shared signed multiplier block to calculate the coefficients sequentially, reducing the physical microcell count and logic density.
+   * [parallel_tx.v](rtl/parallel_tx.v) streams the calibrated 12-bit values back to the RP2040 over the 4-bit parallel bus using strobe synchronization.
 ---
  
 ## Hardware-in-the-Loop (HIL) Implementation
