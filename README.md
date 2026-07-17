@@ -207,86 +207,72 @@ Solving this globally over the full-scale sinusoidal swing balances the fitting 
  
 ### 6. Fixed-Point Quantization and Scaling Mathematics
  
-Implementing floating-point arithmetic directly inside an FPGA requires significant logic resources and introduces latency. Instead, we map the floating-point weights $\mathbf{w}$ to fixed-point integer coefficients using binary scaling factors (Q-format representation).
+Implementing floating-point arithmetic directly inside an FPGA requires significant logic resources and introduces latency. Instead, we map the floating-point weights $w$ to fixed-point integer coefficients using binary scaling factors (Q-format representation).
  
 We choose dynamic fractional scaling for each degree to maximize the dynamic range and prevent underflow of small coefficients:
  
-* **Constant Coefficient ($w_0$)**: Scaled by $2^0$.
-  $$
-  \text{COEFF\_C0} = \text{round}(w_0 \cdot 2^0) = -120 \quad (\text{0xFF88} \text{ in 16-bit 2's complement})
-  $$
-* **Linear Coefficient ($w_1$)**: Scaled by $2^{12} = 4096$ (Q12).
-  $$
-  \text{COEFF\_C1} = \text{round}(w_1 \cdot 2^{12}) = \text{round}(1.20117 \cdot 4096) = 4920 \quad (\text{0x1338})
-  $$
-* **Second-Order Coefficient ($w_2$)**: Scaled by $2^{24} = 16777216$ (Q24).
-  $$
-  \text{COEFF\_C2} = \text{round}(w_2 \cdot 2^{24}) = \text{round}(-3.755 \cdot 10^{-5} \cdot 16777216) = -630 \quad (\text{0xFD8A})
-  $$
-* **Third-Order Coefficient ($w_3$)**: Scaled by $2^{36} = 6.8719 \cdot 10^{10}$ (Q36).
-  $$
-  \text{COEFF\_C3} = \text{round}(w_3 \cdot 2^{36}) = \text{round}(3.056 \cdot 10^{-9} \cdot 6.8719 \cdot 10^{10}) = 210 \quad (\text{0x00D2})
-  $$
+| Coefficient | Q-format | Scaling | Computation | Result |
+|---|---|---|---|---|
+| `COEFF_C0` ($w_0$) | Q0 | $2^0$ | `round(w_0 * 2^0)` | `-120` (`0xFF88`, 16-bit two's complement) |
+| `COEFF_C1` ($w_1$) | Q12 | $2^{12} = 4096$ | `round(w_1 * 4096) = round(1.20117 * 4096)` | `4920` (`0x1338`) |
+| `COEFF_C2` ($w_2$) | Q24 | $2^{24} = 16{,}777{,}216$ | `round(w_2 * 2^24) = round(-3.755e-5 * 2^24)` | `-630` (`0xFD8A`) |
+| `COEFF_C3` ($w_3$) | Q36 | $2^{36} \approx 6.8719 \times 10^{10}$ | `round(w_3 * 2^36) = round(3.056e-9 * 6.8719e10)` | `210` (`0x00D2`) |
+ 
 #### Step-by-Step FPGA Register Math
  
 Let's trace how the Verilog module [adc_calibrator.v](rtl/adc_calibrator.v) evaluates this polynomial using intermediate shifts to keep signals bounded within 13-bit signed registers:
  
-1. **Zero-Centering the Input**:
-   $$
-   x_{\text{reg}} = \text{raw\_adc} - 2048 \quad \in [-2048, 2047]
-   $$
-2. **Sequential Power Multiplication**:
-   * *Compute $x^2$*:
-     $$
-     x^2_{\text{reg}} = (x_{\text{reg}} \cdot x_{\text{reg}}) \gg 12
-     $$
-     The 13-bit $\times$ 13-bit signed multiplication yields a 25-bit product. Shifting right by 12 bits scales it back to a 13-bit signed representation ($x^2 / 2^{12}$).
-   * *Compute $x^3$*:
-     $$
-     x^3_{\text{reg}} = (x^2_{\text{reg}} \cdot x_{\text{reg}}) \gg 12
-     $$
-     Multiplying $x^2 / 2^{12}$ (13-bit) by $x_{\text{reg}}$ (13-bit) yields a 25-bit product. Shifting right by 12 scales it to $x^3 / 2^{24}$, stored in 13-bit signed `x3_reg`.
-3. **Coefficient Product Generation**:
-   * $$
-     p_1 = \text{COEFF\_C1} \cdot x_{\text{reg}}
-     $$
-   * $$
-     p_2 = \text{COEFF\_C2} \cdot x^2_{\text{reg}} = \text{COEFF\_C2} \cdot \left(\frac{x^2}{2^{12}}\right)
-     $$
-   * $$
-     p_3 = \text{COEFF\_C3} \cdot x^3_{\text{reg}} = \text{COEFF\_C3} \cdot \left(\frac{x^3}{2^{24}}\right)
-     $$
-   These three intermediate products ($p_1, p_2, p_3$) are stored in 29-bit signed registers.
-4. **Parallel Accumulation & Reconstruction**:
-   The final calibrated output is calculated in a combinational block:
-   $$
-   y_{\text{scaled\_comb}} = \text{COEFF\_C0} + (p_1 \gg 12) + (p_2 \gg 12) + (p_3 \gg 12) + 2048
-   $$
-   We verify the mathematical scaling of each term:
-   * **Term 1**:
-     $$
-     \text{COEFF\_C0} = w_0
-     $$
-   * **Term 2**:
-     $$
-     \frac{p_1}{2^{12}} = \frac{\text{COEFF\_C1} \cdot x}{2^{12}} = \frac{(w_1 \cdot 2^{12}) \cdot x}{2^{12}} = w_1 x
-     $$
-   * **Term 3**:
-     $$
-     \frac{p_2}{2^{12}} = \frac{\text{COEFF\_C2} \cdot (x^2 / 2^{12})}{2^{12}} = \frac{(w_2 \cdot 2^{24}) \cdot x^2}{2^{24}} = w_2 x^2
-     $$
-   * **Term 4**:
-     $$
-     \frac{p_3}{2^{12}} = \frac{\text{COEFF\_C3} \cdot (x^3 / 2^{24})}{2^{12}} = \frac{(w_3 \cdot 2^{36}) \cdot x^3}{2^{36}} = w_3 x^3
-     $$
-   The scaling aligns perfectly, producing the reconstructed calibrated code. Adding $2048$ restores the offset to the standard unsigned 12-bit range $[0, 4095]$.
-5. **Saturation Logic**:
-   To prevent overflow wrap-around where values exceeding 4095 wrap around to 0 (causing severe dynamic noise spikes), a clipping block constrains the output code to $[0, 4095]$:
-   $$
-   \text{calibrated\_adc} = \max(0, \min(4095, y_{\text{scaled\_comb}}))
-   $$
----
+1. **Zero-Centering the Input**
+```
+   x_reg = raw_adc - 2048        // range: [-2048, 2047]
+```
  
+2. **Sequential Power Multiplication**
+   * Compute $x^2$:
+```
+     x2_reg = (x_reg * x_reg) >> 12
+```
+     The 13-bit × 13-bit signed multiplication yields a 25-bit product. Shifting right by 12 bits scales it back to a 13-bit signed representation ($x^2 / 2^{12}$).
+   * Compute $x^3$:
+```
+     x3_reg = (x2_reg * x_reg) >> 12
+```
+     Multiplying $x^2/2^{12}$ (13-bit) by `x_reg` (13-bit) yields a 25-bit product. Shifting right by 12 scales it to $x^3/2^{24}$, stored in the 13-bit signed `x3_reg`.
+ 
+3. **Coefficient Product Generation**
+```
+   p_1 = COEFF_C1 * x_reg
+   p_2 = COEFF_C2 * x2_reg     //  = COEFF_C2 * (x^2 / 2^12)
+   p_3 = COEFF_C3 * x3_reg     //  = COEFF_C3 * (x^3 / 2^24)
+```
+ 
+   These three intermediate products (`p_1`, `p_2`, `p_3`) are stored in 29-bit signed registers.
+ 
+4. **Parallel Accumulation & Reconstruction**
+   The final calibrated output is calculated in a combinational block:
+```
+   y_scaled_comb = COEFF_C0 + (p_1 >> 12) + (p_2 >> 12) + (p_3 >> 12) + 2048
+```
+ 
+   We verify the mathematical scaling of each term:
+ 
+   | Term | Register expression | Simplifies to |
+   |---|---|---|
+   | 1 | `COEFF_C0` | $w_0$ |
+   | 2 | `p_1 / 2^12` | $w_1 x$ |
+   | 3 | `p_2 / 2^12` | $w_2 x^2$ |
+   | 4 | `p_3 / 2^12` | $w_3 x^3$ |
+ 
+   The scaling aligns perfectly, producing the reconstructed calibrated code. Adding `2048` restores the offset to the standard unsigned 12-bit range $[0, 4095]$.
+ 
+5. **Saturation Logic**
+   To prevent overflow wrap-around where values exceeding 4095 wrap around to 0 (causing severe dynamic noise spikes), a clipping block constrains the output code to $[0, 4095]$:
+```
+   calibrated_adc = max(0, min(4095, y_scaled_comb))
+```
+ 
+---
+
 ## Hardware-in-the-Loop (HIL) Implementation
  
 We designed and implemented a hardware-in-the-loop (HIL) calibration system consisting of:
